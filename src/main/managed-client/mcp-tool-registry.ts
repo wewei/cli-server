@@ -22,9 +22,12 @@ const SESSION_DESKTOP_TOOL_NAMES = [
 const ADVERTISED_DESKTOP_TOOL_NAMES = new Set([
   'shell_execute',
   'file_read',
-  'managed_mcp_server_upsert',
+  'remote_configure_mcp_server',
   ...SESSION_DESKTOP_TOOL_NAMES,
 ]);
+
+const EXTERNAL_MCP_CONNECT_TIMEOUT_MS = 5 * 60 * 1000;
+const EXTERNAL_MCP_LIST_TOOLS_TIMEOUT_MS = 5 * 60 * 1000;
 
 function getEnabledDesktopToolNames(): Set<string> {
   const config = getBuiltInToolsSecurityConfig();
@@ -41,8 +44,8 @@ function getEnabledDesktopToolNames(): Set<string> {
     enabledTools.add('file_read');
   }
 
-  if (config.managedMcpServerAdmin.enabled && isDesktopToolPublishedForPermissionProfile(config.permissionProfile, 'managed_mcp_server_upsert')) {
-    enabledTools.add('managed_mcp_server_upsert');
+  if (config.managedMcpServerAdmin.enabled && isDesktopToolPublishedForPermissionProfile(config.permissionProfile, 'remote_configure_mcp_server')) {
+    enabledTools.add('remote_configure_mcp_server');
   }
 
   return enabledTools;
@@ -104,6 +107,25 @@ interface ConnectedExternalMcpServer {
 interface ToolRegistryLogger {
   info: (command: string, stdout: unknown) => void;
   error: (command: string, stdout: unknown, stderr: string) => void;
+}
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+  let timeoutHandle: NodeJS.Timeout | null = null;
+
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_resolve, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(timeoutMessage));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
 }
 
 function pathMatchesRoot(candidatePath: string, rootPath: string): boolean {
@@ -180,6 +202,7 @@ export class ManagedClientMcpToolRegistry {
   private constructor(
     private readonly localClient: Client,
     private readonly externalServers: ConnectedExternalMcpServer[],
+    private readonly logger: ToolRegistryLogger,
   ) {}
 
   static async create(params: {
@@ -197,7 +220,7 @@ export class ManagedClientMcpToolRegistry {
       params.workspaceRoot,
       params.defaultWorkingDirectory,
     );
-    const registry = new ManagedClientMcpToolRegistry(params.localClient, externalServers);
+    const registry = new ManagedClientMcpToolRegistry(params.localClient, externalServers, params.logger);
     await registry.buildBindings();
     return registry;
   }
@@ -247,8 +270,16 @@ export class ManagedClientMcpToolRegistry {
         });
 
       try {
-        await client.connect(transport);
-        const toolList = await client.listTools();
+        await withTimeout(
+          client.connect(transport),
+          EXTERNAL_MCP_CONNECT_TIMEOUT_MS,
+          `Timed out connecting to external MCP server: ${serverConfig.name}`,
+        );
+        const toolList = await withTimeout(
+          client.listTools(),
+          EXTERNAL_MCP_LIST_TOOLS_TIMEOUT_MS,
+          `Timed out listing tools from external MCP server: ${serverConfig.name}`,
+        );
         const filteredTools = filterToolsByConfig(serverConfig, toolList.tools);
         results.push({
           name: serverConfig.name,
@@ -275,6 +306,11 @@ export class ManagedClientMcpToolRegistry {
     }
 
     return results;
+  }
+
+  async rebuildBindings(): Promise<void> {
+    this.toolBindings.clear();
+    await this.buildBindings();
   }
 
   async close(): Promise<void> {
@@ -348,19 +384,33 @@ export class ManagedClientMcpToolRegistry {
         continue;
       }
 
-      const toolList = await externalServer.client.listTools();
-      const filteredTools = filterToolsByConfig(externalServer.config, toolList.tools);
-      for (const tool of filteredTools) {
-        const advertisedName = getExternalAdvertisedToolName(externalServer.config, tool.name);
-        this.toolBindings.set(advertisedName, {
-          advertisedName,
-          upstreamName: tool.name,
-          description: tool.description ?? '',
-          inputSchema: tool.inputSchema,
-          client: externalServer.client,
-          source: 'external',
-          sourceName: externalServer.config.name,
-        });
+      try {
+        const toolList = await withTimeout(
+          externalServer.client.listTools(),
+          EXTERNAL_MCP_LIST_TOOLS_TIMEOUT_MS,
+          `Timed out listing tools from external MCP server: ${externalServer.config.name}`,
+        );
+        const filteredTools = filterToolsByConfig(externalServer.config, toolList.tools);
+        for (const tool of filteredTools) {
+          const advertisedName = getExternalAdvertisedToolName(externalServer.config, tool.name);
+          this.toolBindings.set(advertisedName, {
+            advertisedName,
+            upstreamName: tool.name,
+            description: tool.description ?? '',
+            inputSchema: tool.inputSchema,
+            client: externalServer.client,
+            source: 'external',
+            sourceName: externalServer.config.name,
+          });
+        }
+      } catch (error) {
+        this.logger.error('[managed-client-mcp-ws] external mcp server tools skipped', {
+          name: externalServer.config.name,
+          transport: externalServer.config.transport,
+          publishedRemotely: externalServer.config.publishedRemotely,
+          trustLevel: externalServer.config.trustLevel,
+          tools: externalServer.config.tools,
+        }, error instanceof Error ? error.message : String(error));
       }
     }
   }
@@ -376,9 +426,7 @@ export class ManagedClientMcpToolRegistry {
       return [];
     }
 
-    const connected: ConnectedExternalMcpServer[] = [];
-
-    for (const serverConfig of serverConfigs) {
+    const results = await Promise.allSettled(serverConfigs.map(async (serverConfig) => {
       const client = new Client({
         name: `cli-server-managed-client-mcp-ws-${serverConfig.name}`,
         version,
@@ -399,12 +447,11 @@ export class ManagedClientMcpToolRegistry {
         });
 
       try {
-        await client.connect(transport);
-        connected.push({
-          config: serverConfig,
-          client,
-          transport,
-        });
+        await withTimeout(
+          client.connect(transport),
+          EXTERNAL_MCP_CONNECT_TIMEOUT_MS,
+          `Timed out connecting to external MCP server: ${serverConfig.name}`,
+        );
         logger.info('[managed-client-mcp-ws] external mcp server connected', {
           name: serverConfig.name,
           transport: serverConfig.transport,
@@ -416,6 +463,7 @@ export class ManagedClientMcpToolRegistry {
           tools: serverConfig.tools,
           url: serverConfig.transport === 'http' ? serverConfig.url : undefined,
         });
+        return { config: serverConfig, client, transport } as ConnectedExternalMcpServer;
       } catch (error) {
         await client.close().catch(() => undefined);
         await transport.close().catch(() => undefined);
@@ -430,9 +478,13 @@ export class ManagedClientMcpToolRegistry {
           tools: serverConfig.tools,
           url: serverConfig.transport === 'http' ? serverConfig.url : undefined,
         }, error instanceof Error ? error.message : String(error));
+        return null;
       }
-    }
+    }));
 
-    return connected;
+    return results
+      .filter((r): r is PromiseFulfilledResult<ConnectedExternalMcpServer | null> => r.status === 'fulfilled')
+      .map((r) => r.value)
+      .filter((v): v is ConnectedExternalMcpServer => v !== null);
   }
 }

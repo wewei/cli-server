@@ -93,6 +93,7 @@ interface McpServerOptions {
   enforcedWorkingDirectoryRoot?: string;
   requireShellAllowlist?: boolean;
   exposeManagedAdminTool?: boolean;
+  onActivity?: (area: string, action: string, summary: string, status: 'success' | 'info' | 'error', details?: Record<string, unknown>) => void;
 }
 
 function resolveWorkingDirectory(cwd: string | undefined, options?: McpServerOptions): string | undefined {
@@ -296,7 +297,7 @@ export function createMcpServer(sessionManager: SessionManager, clientIp: string
 
   if (options?.exposeManagedAdminTool) {
     server.tool(
-      'managed_mcp_server_upsert',
+      'remote_configure_mcp_server',
       'Create or update a managed external MCP server configuration on this desktop node. This is the official supported path for adding MCP servers locally when the built-in policy enables it.',
       {
         name: z.string().describe('Unique MCP server name used as the local config key'),
@@ -304,7 +305,7 @@ export function createMcpServer(sessionManager: SessionManager, clientIp: string
         enabled: z.boolean().optional().describe('Whether the configured MCP server is enabled locally (default: true)'),
         tool_prefix: z.string().optional().describe('Optional advertised tool prefix. Defaults to the server name.'),
         tools: z.array(z.string()).optional().describe('Optional allow-list of tools for this server. Remote publication now requires explicit tool names.'),
-        trust_level: z.enum(['trusted', 'internal-reviewed', 'experimental', 'blocked']).optional().describe('Governance trust level for remote publication.'),
+        trust_level: z.enum(['trusted', 'internal-reviewed', 'experimental', 'blocked']).optional().describe('Governance trust level for remote publication. New servers default to experimental.'),
         published_remotely: z.boolean().optional().describe('Whether this external MCP server may be published to the remote managed-client session.'),
         url: z.string().optional().describe('HTTP server URL when transport=http'),
         timeout: z.number().int().positive().optional().describe('Optional HTTP timeout in milliseconds when transport=http'),
@@ -331,6 +332,14 @@ export function createMcpServer(sessionManager: SessionManager, clientIp: string
             env,
           });
 
+          options?.onActivity?.(
+            'mcp-servers',
+            result.created ? 'remote-create' : 'remote-update',
+            `Remote ${result.created ? 'created' : 'updated'} MCP server "${result.name}"`,
+            'success',
+            { name: result.name, transport, created: result.created, applied: result.applied, toolCount: result.toolCount },
+          );
+
           return json({
             name: result.name,
             created: result.created,
@@ -341,6 +350,13 @@ export function createMcpServer(sessionManager: SessionManager, clientIp: string
             reason: result.reason ?? null,
           });
         } catch (err) {
+          options?.onActivity?.(
+            'mcp-servers',
+            'remote-configure-error',
+            `Remote configure MCP server "${name}" failed: ${String(err)}`,
+            'error',
+            { name, transport },
+          );
           return error(String(err));
         }
       },
