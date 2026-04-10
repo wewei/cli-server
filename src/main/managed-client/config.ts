@@ -14,6 +14,8 @@ import {
   type BuiltInToolsPermissionProfile,
 } from '../builtin-tools/types';
 
+export type ToolCallApprovalMode = 'auto' | 'manual';
+
 interface ManagedClientFileConfig {
   mode?: ManagedClientMode;
   bootstrapBaseUrl?: string;
@@ -29,6 +31,7 @@ interface ManagedClientFileConfig {
   enabled?: boolean;
   mcpServers?: Record<string, ManagedClientFileMcpServerConfig>;
   builtInTools?: PartialBuiltInToolsSecurityConfig;
+  toolCallApprovalMode?: ToolCallApprovalMode;
 }
 
 type PartialBuiltInToolsSecurityConfig = {
@@ -122,6 +125,8 @@ function serializeBuiltInToolsSecurityConfig(config: BuiltInToolsSecurityConfig)
       enabled: normalized.managedMcpServerAdmin.enabled,
       allowHttpServers: normalized.managedMcpServerAdmin.allowHttpServers,
       allowStdioServers: normalized.managedMcpServerAdmin.allowStdioServers,
+      sandboxStdioServers: normalized.managedMcpServerAdmin.sandboxStdioServers,
+      allowedStdioServerCommands: normalized.managedMcpServerAdmin.allowedStdioServerCommands,
     },
   };
 }
@@ -174,6 +179,18 @@ function normalizeBuiltInToolsSecurityConfig(parsed: unknown): BuiltInToolsSecur
           typeof shellExecute === 'object' && shellExecute !== null ? (shellExecute as { blockNetworkCommands?: unknown }).blockNetworkCommands : undefined,
           !defaults.shellExecute.allowNetworkCommands,
         ),
+      allowInlineScripts: parseBooleanValue(
+        typeof shellExecute === 'object' && shellExecute !== null ? (shellExecute as { allowInlineScripts?: unknown }).allowInlineScripts : undefined,
+        defaults.shellExecute.allowInlineScripts,
+      ),
+      allowPathsOutsideWorkspace: parseBooleanValue(
+        typeof shellExecute === 'object' && shellExecute !== null ? (shellExecute as { allowPathsOutsideWorkspace?: unknown }).allowPathsOutsideWorkspace : undefined,
+        defaults.shellExecute.allowPathsOutsideWorkspace,
+      ),
+      sandboxExecution: parseBooleanValue(
+        typeof shellExecute === 'object' && shellExecute !== null ? (shellExecute as { sandboxExecution?: unknown }).sandboxExecution : undefined,
+        defaults.shellExecute.sandboxExecution,
+      ),
       maxCommandLength: parsePositiveNumber(
         typeof shellExecute === 'object' && shellExecute !== null ? (shellExecute as { maxCommandLength?: unknown }).maxCommandLength : undefined,
         defaults.shellExecute.maxCommandLength,
@@ -217,6 +234,13 @@ function normalizeBuiltInToolsSecurityConfig(parsed: unknown): BuiltInToolsSecur
         typeof managedMcpServerAdmin === 'object' && managedMcpServerAdmin !== null ? (managedMcpServerAdmin as { allowStdioServers?: unknown }).allowStdioServers : undefined,
         defaults.managedMcpServerAdmin.allowStdioServers,
       ),
+      sandboxStdioServers: parseBooleanValue(
+        typeof managedMcpServerAdmin === 'object' && managedMcpServerAdmin !== null ? (managedMcpServerAdmin as { sandboxStdioServers?: unknown }).sandboxStdioServers : undefined,
+        defaults.managedMcpServerAdmin.sandboxStdioServers,
+      ),
+      allowedStdioServerCommands: parseStringList(
+        typeof managedMcpServerAdmin === 'object' && managedMcpServerAdmin !== null ? (managedMcpServerAdmin as { allowedStdioServerCommands?: unknown }).allowedStdioServerCommands : undefined,
+      ),
     },
   });
 }
@@ -254,6 +278,14 @@ export function saveBuiltInToolsSecurityConfig(config: BuiltInToolsSecurityConfi
   saveManagedClientFileConfig({
     builtInTools: serializeBuiltInToolsSecurityConfig(normalizeBuiltInToolsSecurityConfig(config)),
   });
+}
+
+export function getToolCallApprovalMode(): ToolCallApprovalMode {
+  return loadManagedClientFileConfig().toolCallApprovalMode ?? 'manual';
+}
+
+export function setToolCallApprovalMode(mode: ToolCallApprovalMode): void {
+  saveManagedClientFileConfig({ toolCallApprovalMode: mode });
 }
 
 function loadManagedClientMcpFileConfig(): Record<string, ManagedClientFileMcpServerConfig> {
