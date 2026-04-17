@@ -9,3 +9,20 @@ managed-client.mcp-servers.json
 managed-client-workspace/
 .playwright-mcp/
 .superpowers/
+.landgod-data/
+bin/
+# Runtime data (不提交)
+.landgod-data/
+managed-client.config.json
+managed-client.mcp-servers.json
+
+# Build artifacts
+dist/
+dist-headless/
+*.tgz
+*.whl
+*.tar.gz
+
+# OS files
+.DS_Store
+Thumbs.db
